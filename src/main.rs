@@ -2,10 +2,10 @@ use std::mem::size_of_val;
 use std::ops::ControlFlow;
 use std::thread;
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use pollster::block_on;
-use wgpu::{BindGroup, BufferSize, ComputePipeline, Device, Queue};
+use wgpu::{BindGroup, BufferSize, ComputePipeline, Device, MemoryHints, PresentMode, Queue};
 use winit::{
     event::*,
     event_loop::EventLoop,
@@ -16,6 +16,9 @@ use wgpu::util::DeviceExt;
 use winit::dpi::{PhysicalSize, Size};
 use winit::event_loop::EventLoopBuilder;
 use winit::platform::windows::EventLoopBuilderExtWindows;
+
+const sleeptime: u64 = 1;
+const numparticles: u32 = 5000;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -140,12 +143,13 @@ impl<'a> State<'a> {
 			0, 0, 0,
 		);
         
-        let num_particles = 1000;
+        let num_particles = numparticles;
         let mut particles = Vec::new();
         for _ in 0..num_particles {
             particles.push(Particle {
-                position: [0.5, 0.5],
-                velocity: [rand::random(), rand::random()],
+                position: [0.5 + rand::random::<f32>()/5.0, 0.5 + rand::random::<f32>()/5.0],
+                velocity: //[0.0, rand::random::<f32>()/2.0]
+                 [rand::random::<f32>()*2.0 - 1.0, rand::random::<f32>()*2.0 - 1.0]
             });
         }
         
@@ -167,7 +171,7 @@ impl<'a> State<'a> {
 
         let adapter = instance.request_adapter(
             &wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::default(),
+                power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
             },
@@ -180,7 +184,7 @@ impl<'a> State<'a> {
                 // we're building for the web, we'll have to disable some.
                 required_limits: wgpu::Limits::default(),
                 label: None,
-                memory_hints: Default::default(),
+                memory_hints: MemoryHints::Performance,
             },
             None, // Trace path
         ).await.unwrap();
@@ -198,7 +202,7 @@ impl<'a> State<'a> {
             format: surface_format,
             width: size.width,
             height: size.height,
-            present_mode: surface_caps.present_modes[0],
+            present_mode: PresentMode::AutoVsync,
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
@@ -327,15 +331,10 @@ impl<'a> State<'a> {
     }
 
     fn update(&mut self) {
-
-    }
-
-    fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
-        let output = self.surface.get_current_texture()?;
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Compute Encoder"),
         });
+        let mut start = Instant::now();
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: None,
@@ -347,7 +346,13 @@ impl<'a> State<'a> {
             cpass.dispatch_workgroups(self.num_particles, 1, 1);
         }
         self.queue.submit(std::iter::once(encoder.finish()));
-        
+        println!("compute duration: {}", start.elapsed().as_millis());
+    }
+
+    fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+        let output = self.surface.get_current_texture()?;
+        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let start = Instant::now();
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
         });
@@ -383,11 +388,11 @@ impl<'a> State<'a> {
         // submit will accept anything that implements IntoIter
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
+        println!("draw duration: {}", start.elapsed().as_millis());
 
         Ok(())
     }
 }
-
 fn go(event_loop: EventLoop<()>, mut state: State) {
     let d = event_loop.run(move |event, control_flow| {
         match event {
@@ -434,7 +439,7 @@ fn go(event_loop: EventLoop<()>, mut state: State) {
                         }
 
                         // This tells winit that we want another frame after this one
-                        sleep(Duration::from_millis(5));
+                        sleep(Duration::from_millis(sleeptime));
                         //println!("redraw!");
                         state.window().request_redraw();
                     },
