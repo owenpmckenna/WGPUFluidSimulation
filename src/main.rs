@@ -14,11 +14,12 @@ use winit::{
 };
 use wgpu::util::DeviceExt;
 use winit::dpi::{PhysicalSize, Size};
-use winit::event_loop::EventLoopBuilder;
+use winit::event_loop::{EventLoopBuilder, EventLoopWindowTarget};
 use winit::platform::windows::EventLoopBuilderExtWindows;
 
 const sleeptime: u64 = 1;
-const numparticles: u32 = 5000;
+const numparticles: u32 = 1000;
+const USE_TESTING_SHADER: bool = false;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -101,7 +102,7 @@ struct ComputeState {
 fn setup_compute(device: &Device, particles: &Vec<Particle>) -> ComputeState {
     let cs_module = device.create_shader_module(wgpu::include_wgsl!("compute_shader.wgsl"));
     let size = size_of_val(particles) as wgpu::BufferAddress;
-    
+
     let storage_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("Storage Buffer"),
         contents: bytemuck::cast_slice(particles),
@@ -132,27 +133,27 @@ impl<'a> State<'a> {
     // Creating some of the wgpu types requires async code
     async fn new(window: &'a Window) -> State<'a> {
         let vertices = vec!(
-			Vertex { position: [-1.0, -1.0, 0.0], color: [0.5, 0.0, 0.5] },
-			Vertex { position: [-1.0, 1.0, 0.0], color: [0.0, 0.5, 0.5] },
-			Vertex { position: [1.0, -1.0, 0.0], color: [0.0, 0.5, 0.5] },
-			Vertex { position: [1.0, 1.0, 0.0], color: [0.5, 0.0, 0.5] },
-		);
-		let indices = vec!(
-			0, 1, 2,
-			1, 2, 3,
-			0, 0, 0,
-		);
-        
+            Vertex { position: [-1.0, -1.0, 0.0], color: [0.5, 0.0, 0.5] },
+            Vertex { position: [-1.0, 1.0, 0.0], color: [0.0, 0.5, 0.5] },
+            Vertex { position: [1.0, -1.0, 0.0], color: [0.0, 0.5, 0.5] },
+            Vertex { position: [1.0, 1.0, 0.0], color: [0.5, 0.0, 0.5] },
+        );
+        let indices = vec!(
+            0, 1, 2,
+            1, 2, 3,
+            0, 0, 0,
+        );
+
         let num_particles = numparticles;
         let mut particles = Vec::new();
         for _ in 0..num_particles {
             particles.push(Particle {
                 position: [0.5 + rand::random::<f32>()/5.0, 0.5 + rand::random::<f32>()/5.0],
                 velocity: //[0.0, rand::random::<f32>()/2.0]
-                 [rand::random::<f32>()*2.0 - 1.0, rand::random::<f32>()*2.0 - 1.0]
+                [rand::random::<f32>()*2.0 - 1.0, rand::random::<f32>()*2.0 - 1.0]
             });
         }
-        
+
         let num_indices = indices.len() as u32;
 
         let size = window.inner_size();
@@ -202,7 +203,7 @@ impl<'a> State<'a> {
             format: surface_format,
             width: size.width,
             height: size.height,
-            present_mode: PresentMode::AutoVsync,
+            present_mode: PresentMode::Immediate,
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
@@ -210,7 +211,12 @@ impl<'a> State<'a> {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                match USE_TESTING_SHADER {
+                    true => include_str!("shader_test.wgsl"),
+                    false => include_str!("shader.wgsl")
+                }
+                    .into()),
         });
 
         let vertex_particle_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -377,7 +383,7 @@ impl<'a> State<'a> {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
-            
+
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
@@ -393,6 +399,52 @@ impl<'a> State<'a> {
         Ok(())
     }
 }
+fn handle_window_event(event: &WindowEvent, control_flow: &EventLoopWindowTarget<()>, state: &mut State) {
+    match event {
+        WindowEvent::CloseRequested
+        | WindowEvent::KeyboardInput {
+            event:
+            KeyEvent {
+                state: ElementState::Pressed,
+                physical_key: PhysicalKey::Code(KeyCode::Escape),
+                ..
+            },
+            ..
+        } => control_flow.exit(),
+        WindowEvent::Resized(physical_size) => {
+            state.resize(*physical_size);
+        },
+        WindowEvent::RedrawRequested => {
+            //if !surface_configured {
+            //	return;
+            //}
+            state.update();
+            match state.render() {
+                Ok(_) => {}
+                // Reconfigure the surface if it's lost or outdated
+                Err(
+                    wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated,
+                ) => state.resize(state.size),
+                // The system is out of memory, we should probably quit
+                Err(wgpu::SurfaceError::OutOfMemory) => {
+                    log::error!("OutOfMemory");
+                    control_flow.exit();
+                }
+
+                // This happens when the a frame takes too long to present
+                Err(wgpu::SurfaceError::Timeout) => {
+                    log::warn!("Surface timeout")
+                }
+            }
+
+            // This tells winit that we want another frame after this one
+            sleep(Duration::from_millis(sleeptime));
+            //println!("redraw!");
+            state.window().request_redraw();
+        },
+        _ => {}
+    }
+}
 fn go(event_loop: EventLoop<()>, mut state: State) {
     let d = event_loop.run(move |event, control_flow| {
         match event {
@@ -400,51 +452,7 @@ fn go(event_loop: EventLoop<()>, mut state: State) {
                 ref event,
                 window_id,
             } if window_id == state.window().id() => if !state.input(event) {
-                match event {
-                    WindowEvent::CloseRequested
-                    | WindowEvent::KeyboardInput {
-                        event:
-                        KeyEvent {
-                            state: ElementState::Pressed,
-                            physical_key: PhysicalKey::Code(KeyCode::Escape),
-                            ..
-                        },
-                        ..
-                    } => control_flow.exit(),
-                    WindowEvent::Resized(physical_size) => {
-                        state.resize(*physical_size);
-                    },
-                    WindowEvent::RedrawRequested => {
-
-                        //if !surface_configured {
-                        //	return;
-                        //}
-                        state.update();
-                        match state.render() {
-                            Ok(_) => {}
-                            // Reconfigure the surface if it's lost or outdated
-                            Err(
-                                wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated,
-                            ) => state.resize(state.size),
-                            // The system is out of memory, we should probably quit
-                            Err(wgpu::SurfaceError::OutOfMemory) => {
-                                log::error!("OutOfMemory");
-                                control_flow.exit();
-                            }
-
-                            // This happens when the a frame takes too long to present
-                            Err(wgpu::SurfaceError::Timeout) => {
-                                log::warn!("Surface timeout")
-                            }
-                        }
-
-                        // This tells winit that we want another frame after this one
-                        sleep(Duration::from_millis(sleeptime));
-                        //println!("redraw!");
-                        state.window().request_redraw();
-                    },
-                    _ => {}
-                }
+                handle_window_event(event, control_flow, &mut state);
             },
             _ => {}
         }
