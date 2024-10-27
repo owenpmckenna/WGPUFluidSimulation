@@ -5,7 +5,7 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use pollster::block_on;
-use wgpu::{BindGroup, BufferSize, ComputePipeline, Device, MemoryHints, PresentMode, Queue};
+use wgpu::{BindGroup, BindGroupLayoutDescriptor, BindingType, BufferBindingType, BufferSize, ComputePipeline, Device, Label, MemoryHints, PipelineLayout, PipelineLayoutDescriptor, PresentMode, Queue, ShaderStages};
 use winit::{
     event::*,
     event_loop::EventLoop,
@@ -18,7 +18,7 @@ use winit::event_loop::{EventLoopBuilder, EventLoopWindowTarget};
 use winit::platform::windows::EventLoopBuilderExtWindows;
 
 const sleeptime: u64 = 1;
-const numparticles: u32 = 1000;
+const numparticles: u32 = 2000;
 const USE_TESTING_SHADER: bool = false;
 
 #[repr(C)]
@@ -94,14 +94,24 @@ struct State<'a> {
     // unsafe references to the window's resources.
     window: &'a Window,
 }
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct OuterActionState {
+    mouse_x: f32,
+    mouse_y: f32
+}
 struct ComputeState {
     storage_buffer: wgpu::Buffer,
+    outer_action_buffer: wgpu::Buffer,
     compute_pipeline: wgpu::ComputePipeline,
-    bind_group: wgpu::BindGroup
+    bind_group_storage: wgpu::BindGroup,
+    outer_action_state: OuterActionState
 }
 fn setup_compute(device: &Device, particles: &Vec<Particle>) -> ComputeState {
     let cs_module = device.create_shader_module(wgpu::include_wgsl!("compute_shader.wgsl"));
     let size = size_of_val(particles) as wgpu::BufferAddress;
+
+    let outer_action_state = OuterActionState { mouse_x: 500.0, mouse_y: 560.0 };
 
     let storage_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("Storage Buffer"),
@@ -110,24 +120,66 @@ fn setup_compute(device: &Device, particles: &Vec<Particle>) -> ComputeState {
             | wgpu::BufferUsages::COPY_DST
             | wgpu::BufferUsages::COPY_SRC,
     });
-    let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+    let outer_action_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Outer Action Buffer"),
+        contents: bytemuck::cast_slice(&mut [outer_action_state]),
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::COPY_SRC,
+    });
+    let bind_group_layout_entry0 = wgpu::BindGroupLayoutEntry {
+        binding: 0,
+        visibility: ShaderStages::COMPUTE,
+        ty: BindingType::Buffer {
+            ty: BufferBindingType::Storage { read_only: false },
+            has_dynamic_offset: false,
+            min_binding_size: Some(BufferSize::try_from(storage_buffer.size()).unwrap()),
+        },
+        count: None,
+    };
+    let bind_group_layout_entry1 = wgpu::BindGroupLayoutEntry {
+        binding: 1,
+        visibility: ShaderStages::COMPUTE,
+        ty: BindingType::Buffer {
+            ty: BufferBindingType::Storage { read_only: false },
+            has_dynamic_offset: false,
+            min_binding_size: Some(BufferSize::try_from(outer_action_buffer.size()).unwrap()),
+        },
+        count: None,
+    };
+    let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
         label: None,
-        layout: None,
+        entries: &[bind_group_layout_entry0, bind_group_layout_entry1],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: None,
+        bind_group_layouts: &[&bind_group_layout],
+        push_constant_ranges: &[],
+    });
+    let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("Compute Pipeline"),
+        layout: Some(&pipeline_layout),
         module: &cs_module,
         entry_point: "cs_main",
         compilation_options: Default::default(),
         cache: None,
     });
     let bind_group_layout = compute_pipeline.get_bind_group_layout(0);
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+    let bind_group_storage = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout: &bind_group_layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: storage_buffer.as_entire_binding(),
-        }],
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: storage_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: outer_action_buffer.as_entire_binding(),
+            }
+        ],
     });
-    ComputeState {storage_buffer, compute_pipeline, bind_group}
+    ComputeState {storage_buffer, compute_pipeline, bind_group_storage, outer_action_state, outer_action_buffer}
 }
 impl<'a> State<'a> {
     // Creating some of the wgpu types requires async code
@@ -341,13 +393,14 @@ impl<'a> State<'a> {
             label: Some("Compute Encoder"),
         });
         let mut start = Instant::now();
+        self.queue.write_buffer(&self.compute_state.outer_action_buffer, 0, bytemuck::cast_slice([self.compute_state.outer_action_state].as_slice()));
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: None,
                 timestamp_writes: None,
             });
             cpass.set_pipeline(&self.compute_state.compute_pipeline);
-            cpass.set_bind_group(0, &self.compute_state.bind_group, &[]);
+            cpass.set_bind_group(0, &self.compute_state.bind_group_storage, &[]);
             cpass.insert_debug_marker("compute collatz iterations");
             cpass.dispatch_workgroups(self.num_particles, 1, 1);
         }
@@ -441,6 +494,14 @@ fn handle_window_event(event: &WindowEvent, control_flow: &EventLoopWindowTarget
             sleep(Duration::from_millis(sleeptime));
             //println!("redraw!");
             state.window().request_redraw();
+        },
+        WindowEvent::CursorMoved { position, .. } => {
+            state.compute_state.outer_action_state.mouse_x = position.x as f32;
+            state.compute_state.outer_action_state.mouse_y = position.y as f32;
+        },
+        WindowEvent::CursorLeft {..} => {
+            state.compute_state.outer_action_state.mouse_x = 0.0;
+            state.compute_state.outer_action_state.mouse_y = 0.0;
         },
         _ => {}
     }
