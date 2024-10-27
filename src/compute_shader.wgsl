@@ -50,7 +50,7 @@ fn density_at_point(samplePoint: vec2<f32>, forid: u32) -> f32 {
             density += pow(min(radius-di, 1.0)*35.0, 3.0);
         }
     }
-    return (density - 0.05)/10;
+    return (density - 0.05)*5.0;
 }
 
 @compute @workgroup_size(1)
@@ -62,7 +62,7 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
         // Update particle position based on velocity
 
         //let direction_effect = vec2<f32> =
-        particles[idx].velocity[1] += 0.02;
+        particles[idx].velocity[1] += 0.5;
         //particles[idx].velocity[1] += 0.03;//positive y is down now.
         //how tf is this going to work???
         let stepsize = 0.005;
@@ -77,11 +77,11 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
         particles[idx].velocity[0] -= deltaX0;
         particles[idx].velocity[1] -= deltaY0;
         if (dens < 0.0) {
-            particles[idx].velocity *= 0.995;
+            particles[idx].velocity *= 0.999;
         }
         let particle_size = 0.01;
         let amt = 0.001;
-        let amtmul = -0.8;
+        let amtmul = -0.5;
         if (particles[idx].position[0] > 1.0 - particle_size) {
             particles[idx].velocity[0] *= amtmul;
             particles[idx].position[0] -= amt;

@@ -18,7 +18,7 @@ use winit::event_loop::{EventLoopBuilder, EventLoopWindowTarget};
 use winit::platform::windows::EventLoopBuilderExtWindows;
 
 const sleeptime: u64 = 1;
-const numparticles: u32 = 2000;
+const numparticles: u32 = 4000;
 const USE_TESTING_SHADER: bool = false;
 
 #[repr(C)]
