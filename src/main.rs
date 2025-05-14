@@ -4,6 +4,7 @@ use std::thread;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 use crossbeam_channel::{unbounded, Receiver, Sender};
+use log::Level;
 use pollster::block_on;
 use wgpu::{BindGroup, BindGroupLayoutDescriptor, BindingType, BufferBindingType, BufferSize, ComputePipeline, Device, Label, MemoryHints, PipelineLayout, PipelineLayoutDescriptor, PresentMode, Queue, ShaderStages};
 use winit::{
@@ -15,10 +16,10 @@ use winit::{
 use wgpu::util::DeviceExt;
 use winit::dpi::{PhysicalSize, Size};
 use winit::event_loop::{EventLoopBuilder, EventLoopWindowTarget};
-use winit::platform::windows::EventLoopBuilderExtWindows;
+use winit::platform::wayland::EventLoopBuilderExtWayland;
 
 const sleeptime: u64 = 1;
-const numparticles: u32 = 4000;
+const numparticles: u32 = 3000;
 const USE_TESTING_SHADER: bool = false;
 
 #[repr(C)]
@@ -56,7 +57,7 @@ struct Particle {
 impl Particle {
     fn desc() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<Particle>() as wgpu::BufferAddress,
+            array_stride: size_of::<Particle>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[
                 wgpu::VertexAttribute {
@@ -392,7 +393,7 @@ impl<'a> State<'a> {
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Compute Encoder"),
         });
-        let mut start = Instant::now();
+        let start = Instant::now();
         self.queue.write_buffer(&self.compute_state.outer_action_buffer, 0, bytemuck::cast_slice([self.compute_state.outer_action_state].as_slice()));
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -409,9 +410,11 @@ impl<'a> State<'a> {
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
-        let output = self.surface.get_current_texture()?;
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let start = Instant::now();
+        let output = self.surface.get_current_texture()?;
+        println!("get_current_texture: {}", start.elapsed().as_millis());
+        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        println!("xkcd: {}", start.elapsed().as_millis());
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
         });
@@ -471,7 +474,10 @@ fn handle_window_event(event: &WindowEvent, control_flow: &EventLoopWindowTarget
             //if !surface_configured {
             //	return;
             //}
+            let start = Instant::now();
             state.update();
+            println!("compute time {}", start.elapsed().as_millis());
+            let start = Instant::now();
             match state.render() {
                 Ok(_) => {}
                 // Reconfigure the surface if it's lost or outdated
@@ -489,6 +495,7 @@ fn handle_window_event(event: &WindowEvent, control_flow: &EventLoopWindowTarget
                     log::warn!("Surface timeout")
                 }
             }
+            println!("draw time {}", start.elapsed().as_millis());
 
             // This tells winit that we want another frame after this one
             sleep(Duration::from_millis(sleeptime));
